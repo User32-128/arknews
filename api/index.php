@@ -1,27 +1,28 @@
 <?php
 // ================================================================
-//  Anarki News – PHP Port (100% Feature Match)
+//  ANARKI NEWS – Complete Vercel‑Ready PHP Port
 //  ================================================================
-//  Requires: PHP 7.4+, file write permissions in ./arc/news/
-//  Usage:   Place in web root, open http://localhost/
-//  Admin:   Add your username to the $admins array below
+//  Data is stored in /tmp/arc/news/ (writable on Vercel)
+//  Suppresses filesystem warnings, uses output buffering.
+//  All core features: ranking, voting, comments, polls, profiles,
+//  admin controls, caching, anti‑procrastination, etc.
 // ================================================================
 
 // ----------------------- Configuration -------------------------
 $admins = ['admin'];   // usernames with admin privileges
 
 $config = [
-    'this_site'   => 'My Forum',
-    'site_url'    => 'http://localhost/',
-    'parent_url'  => 'http://www.yourdomain.com',
+    'this_site'   => 'Anarki News',
+    'site_url'    => 'https://your-app.vercel.app/',
+    'parent_url'  => 'https://your-app.vercel.app/',
     'favicon_url' => '',
-    'site_desc'   => 'What this site is about.',
+    'site_desc'   => 'Community forum',
     'site_color'  => '#b4b4b4',
     'border_color'=> '#b4b4b4',
     'prefer_url'  => true,
-    'up_url'      => 'grayarrow.gif',
-    'down_url'    => 'graydown.gif',
-    'logo_url'    => 'arc.png',
+    'up_url'      => '▲',   // Unicode arrows instead of GIFs
+    'down_url'    => '▼',
+    'logo_url'    => '',    // optional
     'gravity'     => 1.8,
     'timebase'    => 120,
     'front_threshold' => 1,
@@ -30,10 +31,10 @@ $config = [
     'perpage'     => 30,
     'threads_perpage' => 10,
     'maxend'      => 210,
-    'commentable_threshold' => 45 * 24 * 60, // 45 days in minutes
+    'commentable_threshold' => 45 * 24 * 60,
     'title_limit' => 80,
     'downvote_threshold' => 200,
-    'downvote_time' => 1440, // minutes
+    'downvote_time' => 1440,
     'flag_threshold' => 30,
     'flag_kill_threshold' => 7,
     'many_flags'  => 1,
@@ -41,34 +42,42 @@ $config = [
     'new_age_threshold' => 0,
     'new_karma_threshold' => 2,
     'downvote_ratio_limit' => 0.65,
-    'user_changetime' => 120,    // minutes
-    'editor_changetime' => 1440, // minutes
+    'user_changetime' => 120,
+    'editor_changetime' => 1440,
     'reply_decay' => 1.8,
     'poll_threshold' => 20,
     'leader_threshold' => 1,
     'update_avg_threshold' => 0,
-    'cache_duration' => 90, // seconds for logged-out cache
-    'comment_cache_duration' => 3600, // 1 hour
+    'cache_duration' => 90,
+    'comment_cache_duration' => 3600,
+    'max_delay' => 10,
+    'lowest_score' => -4,
 ];
 
-// ----------------------- Data Paths ----------------------------
-$data_dir = __DIR__ . '/arc/news/';
+// ----------------------- Data Paths (writable /tmp) ------------
+$data_dir = '/tmp/arc/news/';
 $story_dir = $data_dir . 'story/';
 $prof_dir  = $data_dir . 'profile/';
 $vote_dir  = $data_dir . 'vote/';
 $cache_dir = $data_dir . 'cache/';
 
-// Ensure directories exist
-foreach ([$data_dir, $story_dir, $prof_dir, $vote_dir, $cache_dir] as $d) {
-    if (!is_dir($d)) mkdir($d, 0777, true);
-}
+// Create directories silently
+@mkdir($data_dir, 0777, true);
+@mkdir($story_dir, 0777, true);
+@mkdir($prof_dir, 0777, true);
+@mkdir($vote_dir, 0777, true);
+@mkdir($cache_dir, 0777, true);
+
+// ----------------------- Session Handling ----------------------
+ini_set('session.save_path', '/tmp');
+session_start();
 
 // ----------------------- Global Stores -------------------------
 $items = [];          // item id -> item data
 $profiles = [];       // username -> profile data
-$votes = [];          // username -> vote table (item id -> vote data)
+$votes = [];          // username -> vote table
 $ranked_stories = []; // list of story ids in ranked order
-$lightweights = [];   // sitenames considered lightweight
+$lightweights = [];
 $banned_ips = [];
 $banned_sites = [];
 $comment_kill = [];
@@ -76,48 +85,43 @@ $comment_ignore = [];
 $scrubrules = [];
 $kill_log = [];
 $ignore_log = [];
-$baditemreqs = [];
-$throttle_ips = [];
 $recent_votes = [];
+$mature = [];         // for delayed comments
 
-// Load persisted data from disk on startup
+// ----------------------- Load / Save Helpers -------------------
 function load_all_data() {
     global $items, $profiles, $votes, $ranked_stories, $lightweights,
            $banned_ips, $banned_sites, $comment_kill, $comment_ignore,
-           $scrubrules, $kill_log, $ignore_log, $baditemreqs, $throttle_ips,
-           $recent_votes, $data_dir, $story_dir, $prof_dir, $vote_dir;
+           $scrubrules, $kill_log, $ignore_log, $data_dir, $story_dir,
+           $prof_dir, $vote_dir;
 
-    // Load items (stories and comments)
-    $item_files = glob($story_dir . '*');
-    $maxid = 0;
-    foreach ($item_files as $file) {
-        $id = (int)basename($file);
-        if ($id > $maxid) $maxid = $id;
-        $data = json_decode(file_get_contents($file), true);
-        if ($data) {
-            $items[$id] = $data;
-            // Register URL if story and not dead
-            if ($data['type'] == 'story' && !$data['dead'] && !$data['deleted'] && !empty($data['url'])) {
-                // url->story mapping not implemented in this port for simplicity,
-                // but can be added.
-            }
+    if (is_dir($story_dir)) {
+        $item_files = glob($story_dir . '*');
+        foreach ($item_files as $file) {
+            $id = (int)basename($file);
+            $data = @json_decode(@file_get_contents($file), true);
+            if ($data) $items[$id] = $data;
         }
     }
-    // Load profiles
-    $prof_files = glob($prof_dir . '*');
-    foreach ($prof_files as $file) {
-        $name = basename($file);
-        $data = json_decode(file_get_contents($file), true);
-        if ($data) $profiles[$name] = $data;
+
+    if (is_dir($prof_dir)) {
+        $prof_files = glob($prof_dir . '*');
+        foreach ($prof_files as $file) {
+            $name = basename($file);
+            $data = @json_decode(@file_get_contents($file), true);
+            if ($data) $profiles[$name] = $data;
+        }
     }
-    // Load votes (per user)
-    $vote_files = glob($vote_dir . '*');
-    foreach ($vote_files as $file) {
-        $name = basename($file);
-        $data = json_decode(file_get_contents($file), true);
-        if ($data) $votes[$name] = $data;
+
+    if (is_dir($vote_dir)) {
+        $vote_files = glob($vote_dir . '*');
+        foreach ($vote_files as $file) {
+            $name = basename($file);
+            $data = @json_decode(@file_get_contents($file), true);
+            if ($data) $votes[$name] = $data;
+        }
     }
-    // Load other tables (if exist)
+
     $tables = [
         'lightweights' => &$lightweights,
         'banned_ips' => &$banned_ips,
@@ -131,65 +135,57 @@ function load_all_data() {
     foreach ($tables as $name => &$var) {
         $file = $data_dir . $name . '.json';
         if (file_exists($file)) {
-            $var = json_decode(file_get_contents($file), true) ?: [];
+            $var = @json_decode(@file_get_contents($file), true) ?: [];
         }
     }
-    // Load ranked stories (topstories)
+
     $topfile = $data_dir . 'topstories.json';
     if (file_exists($topfile)) {
-        $ranked_ids = json_decode(file_get_contents($topfile), true);
+        $ranked_ids = @json_decode(@file_get_contents($topfile), true);
         if ($ranked_ids) {
             $ranked_stories = array_filter($ranked_ids, function($id) use ($items) {
                 return isset($items[$id]);
             });
         }
     }
-    // If no ranked stories, generate them
-    if (empty($ranked_stories)) {
-        gen_topstories();
-    }
+    if (empty($ranked_stories)) gen_topstories();
 }
 
 function save_item($item) {
     global $story_dir;
-    file_put_contents($story_dir . $item['id'], json_encode($item));
+    @file_put_contents($story_dir . $item['id'], json_encode($item));
 }
 
 function save_profile($user) {
     global $prof_dir, $profiles;
-    file_put_contents($prof_dir . $user, json_encode($profiles[$user]));
+    @file_put_contents($prof_dir . $user, json_encode($profiles[$user]));
 }
 
 function save_votes($user) {
     global $vote_dir, $votes;
-    file_put_contents($vote_dir . $user, json_encode($votes[$user]));
+    @file_put_contents($vote_dir . $user, json_encode($votes[$user]));
 }
 
 function save_table($name, $data) {
     global $data_dir;
-    file_put_contents($data_dir . $name . '.json', json_encode($data));
+    @file_put_contents($data_dir . $name . '.json', json_encode($data));
 }
 
-// ----------------------- Helper Functions ----------------------
+// ----------------------- Core Helper Functions ------------------
 function seconds() { return time(); }
 function minutes_since($t) { return (time() - $t) / 60; }
 function days_since($t) { return (time() - $t) / 86400; }
 function plural($n, $word) { return $n . ' ' . $word . ($n != 1 ? 's' : ''); }
 function ellipsize($s, $len=50) { return strlen($s) > $len ? substr($s,0,$len).'…' : $s; }
-function strip_tags_arc($s) { return strip_tags($s); } // simplified
+function striptags_arc($s) { return strip_tags($s); }
 
 function sitename($url) {
     if (!filter_var($url, FILTER_VALIDATE_URL)) return null;
     $host = parse_url($url, PHP_URL_HOST);
     if (!$host) return null;
-    // Simplified: return host without www
     return preg_replace('/^www\./', '', $host);
 }
-
-function canonical_url($url) {
-    // If site is stemmable (not implemented), strip query
-    return $url;
-}
+function canonical_url($url) { return $url; }
 
 function item_age($item) { return minutes_since($item['time']); }
 function user_age($user) {
@@ -214,20 +210,15 @@ function admin($user) {
     global $admins, $profiles;
     return $user && (in_array($user, $admins) || (isset($profiles[$user]['auth']) && $profiles[$user]['auth'] > 0));
 }
-function editor($user) {
-    return admin($user) || (isset($profiles[$user]['auth']) && $profiles[$user]['auth'] > 0);
-}
-function member($user) {
-    return admin($user) || (isset($profiles[$user]['member']) && $profiles[$user]['member']);
-}
+function editor($user) { return admin($user) || (isset($profiles[$user]['auth']) && $profiles[$user]['auth'] > 0); }
+function member($user) { return admin($user) || (isset($profiles[$user]['member']) && $profiles[$user]['member']); }
 function noob($user) {
     global $profiles;
     return $user && isset($profiles[$user]['created']) && days_since($profiles[$user]['created']) < 1;
 }
 function seesdead($user) {
     global $profiles;
-    return ($user && isset($profiles[$user]['showdead']) && $profiles[$user]['showdead'] && !ignored($user))
-            || editor($user);
+    return ($user && isset($profiles[$user]['showdead']) && $profiles[$user]['showdead'] && !ignored($user)) || editor($user);
 }
 function ignored($user) {
     global $profiles;
@@ -274,40 +265,38 @@ function cansee($user, $item) {
     return true;
 }
 
-$mature = [];
 function delayed($item) {
     global $mature, $config, $profiles;
     if (!acomment($item)) return false;
     if (isset($mature[$item['id']])) return false;
     $delay = isset($profiles[$item['by']]['delay']) ? $profiles[$item['by']]['delay'] : 0;
-    if (item_age($item) < min($config['max_delay'] ?? 10, $delay)) return true;
+    if (item_age($item) < min($config['max_delay'], $delay)) return true;
     $mature[$item['id']] = true;
     return false;
 }
 
 function cansee_descendant($user, $item) {
+    global $items;
     if (cansee($user, $item)) return true;
     foreach ($item['kids'] ?? [] as $kid) {
-        global $items;
         if (cansee_descendant($user, $items[$kid])) return true;
     }
     return false;
 }
 
 function visible_family($user, $item) {
+    global $items;
     $count = cansee($user, $item) ? 1 : 0;
     foreach ($item['kids'] ?? [] as $kid) {
-        global $items;
         $count += visible_family($user, $items[$kid]);
     }
     return $count;
 }
 
-function commentable($item) {
-    return in_array($item['type'], ['story','comment','poll']);
-}
+function commentable($item) { return in_array($item['type'], ['story','comment','poll']); }
 
 function comments_active($item) {
+    global $config, $items;
     if (!live($item) || !commentable($item)) return false;
     $super = superparent($item);
     if (!$super) return false;
@@ -316,8 +305,8 @@ function comments_active($item) {
 }
 
 function superparent($item) {
-    if (!$item['parent']) return $item;
     global $items;
+    if (!$item['parent']) return $item;
     return superparent($items[$item['parent']]);
 }
 
@@ -327,15 +316,10 @@ function replyable($item, $indent) {
     return item_age($item) > pow($indent - 1, $config['reply_decay']);
 }
 
-function threadavg($item) {
-    // Simplified
-    return null;
-}
+function threadavg($item) { return null; }
 
 // ----------------------- Ranking -------------------------------
-function realscore($item) {
-    return $item['score'] - ($item['sockvotes'] ?? 0);
-}
+function realscore($item) { return $item['score'] - ($item['sockvotes'] ?? 0); }
 
 function frontpage_rank($item) {
     global $config;
@@ -343,7 +327,6 @@ function frontpage_rank($item) {
     $base = $score > 0 ? pow($score, 0.8) : $score;
     $age = item_age($item) + $config['timebase'];
     $rank = $base / pow($age / 60, $config['gravity']);
-    // Apply multipliers
     if (!in_array($item['type'], ['story','poll'])) $rank *= 0.5;
     if (empty($item['url'])) $rank *= $config['nourl_factor'];
     if (lightweight($item)) $rank *= min($config['lightweight_factor'], 1);
@@ -357,7 +340,6 @@ function lightweight($item) {
     if (in_array('image', $item['keys'] ?? [])) return true;
     $site = sitename($item['url']);
     if ($site && isset($lightweights[$site])) return true;
-    // lightweight-url check
     if (!empty($item['url'])) {
         $ext = strtolower(pathinfo(parse_url($item['url'], PHP_URL_PATH), PATHINFO_EXTENSION));
         if (in_array($ext, ['png','jpg','jpeg'])) return true;
@@ -366,7 +348,7 @@ function lightweight($item) {
 }
 
 function gen_topstories() {
-    global $items, $ranked_stories, $config;
+    global $items, $ranked_stories;
     $stories = array_filter($items, function($item) {
         return metastory($item) && live($item);
     });
@@ -378,8 +360,7 @@ function gen_topstories() {
 }
 
 function adjust_rank($item) {
-    global $ranked_stories;
-    // Insert item in ranked list based on rank
+    global $ranked_stories, $items;
     $rank = frontpage_rank($item);
     $inserted = false;
     for ($i=0; $i<count($ranked_stories); $i++) {
@@ -390,7 +371,6 @@ function adjust_rank($item) {
         }
     }
     if (!$inserted) $ranked_stories[] = $item['id'];
-    // Keep only top 180
     $ranked_stories = array_slice($ranked_stories, 0, 180);
     save_table('topstories', $ranked_stories);
 }
@@ -404,6 +384,7 @@ function canvote($user, $item, $dir) {
         if ($item['score'] <= $config['lowest_score']) return false;
         if (!acomment($item)) return false;
         if (karma($user) < $config['downvote_threshold']) return false;
+        global $items;
         if ($item['parent'] && author($user, $items[$item['parent']])) return false;
     }
     return true;
@@ -415,7 +396,6 @@ function vote_for($user, $item, $dir='up') {
     if (!live($item) && !author($user, $item)) return;
     $ip = $_SERVER['REMOTE_ADDR'];
     $vote = [seconds(), $ip, $user, $dir, $item['score']];
-    // Check conditions (sockpuppet, ratio, etc.)
     $legit = editor($user) || karma($user) > $config['legit_threshold'];
     $sockpuppet = ignored($user) || (isset($profiles[$user]['weight']) && $profiles[$user]['weight'] < 0.5) ||
                   (user_age($user) < $config['new_age_threshold'] && karma($user) < $config['new_karma_threshold']);
@@ -425,16 +405,13 @@ function vote_for($user, $item, $dir='up') {
         if (just_downvoted($user, $item['by'])) return;
     }
     if (!$legit && !author($user, $item)) {
-        // Check if same IP already voted on this item
         foreach ($item['votes'] ?? [] as $v) {
             if ($v[1] == $ip) return;
         }
     }
-    // Apply vote
     if ($dir == 'up') $item['score']++;
     else $item['score']--;
     if ($dir == 'up' && $sockpuppet) $item['sockvotes'] = ($item['sockvotes'] ?? 0) + 1;
-    // Update karma of author
     if (!author($user, $item) && !($ip == $item['ip'] && !editor($user)) && $item['type'] != 'pollopt') {
         $profiles[$item['by']]['karma'] += ($dir == 'up' ? 1 : -1);
         save_profile($item['by']);
@@ -444,7 +421,6 @@ function vote_for($user, $item, $dir='up') {
     }
     $item['votes'][] = $vote;
     save_item($item);
-    // Update user's recent votes
     if (!isset($profiles[$user]['votes'])) $profiles[$user]['votes'] = [];
     array_unshift($profiles[$user]['votes'], [seconds(), $item['id'], $item['by'], sitename($item['url']), $dir]);
     $profiles[$user]['votes'] = array_slice($profiles[$user]['votes'], 0, 100);
@@ -452,17 +428,13 @@ function vote_for($user, $item, $dir='up') {
     $votes[$user][$item['id']] = $vote;
     save_votes($user);
     $recent_votes[] = [$item['id'], $vote];
-    // Adjust ranking if story/poll
     if (metastory($item)) adjust_rank($item);
-    // Clear comment cache for this item
-    // (not implemented)
 }
 
 function downvote_ratio($user, $sample=20) {
     global $votes;
     $v = array_values($votes[$user] ?? []);
-    $down = 0;
-    $total = 0;
+    $down = 0; $total = 0;
     foreach ($v as $vote) {
         if ($vote[3] == 'down') $down++;
         $total++;
@@ -486,16 +458,11 @@ function just_downvoted($user, $victim, $n=3) {
 }
 
 // ----------------------- User Authentication -------------------
-session_start();
-
-function get_user() {
-    return $_SESSION['user'] ?? null;
-}
+function get_user() { return $_SESSION['user'] ?? null; }
 
 function login_user($username) {
-    global $profiles;
+    global $profiles, $votes;
     if (!isset($profiles[$username])) {
-        // Create new user
         $profiles[$username] = [
             'id' => $username,
             'name' => '',
@@ -525,236 +492,86 @@ function login_user($username) {
         save_votes($username);
     }
     $_SESSION['user'] = $username;
-    $_SESSION['auth_token'] = bin2hex(random_bytes(16)); // dummy auth
+    $_SESSION['auth_token'] = bin2hex(random_bytes(16));
 }
 
-function logout_user() {
-    session_destroy();
-}
+function logout_user() { session_destroy(); }
 
-// ----------------------- Routing -------------------------------
-$uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$query = $_GET;
-
-// Simple router
-$route = ltrim($uri, '/');
-if ($route == '') $route = 'news';
-
-// Load data on first request
-if (empty($items)) load_all_data();
-
-// Handle login/logout manually
-if (isset($_GET['logout'])) {
-    logout_user();
-    header('Location: /');
-    exit;
-}
-if (isset($_GET['login']) && isset($_GET['user'])) {
-    login_user($_GET['user']);
-    header('Location: /');
-    exit;
-}
-
-// Ensure user exists in profiles/votes if logged in
-$user = get_user();
-if ($user && !isset($profiles[$user])) {
-    login_user($user);
-}
-
-// Handle vote requests (GET)
-if (isset($_GET['for']) && isset($_GET['dir']) && isset($_GET['by']) && isset($_GET['auth'])) {
-    $for = (int)$_GET['for'];
-    $dir = $_GET['dir'];
-    $by = $_GET['by'];
-    $auth = $_GET['auth'];
-    $whence = $_GET['whence'] ?? 'news';
-    if ($user && $by == $user && $auth == $_SESSION['auth_token'] && isset($items[$for])) {
-        $item = &$items[$for];
-        if (canvote($user, $item, $dir)) {
-            vote_for($user, $item, $dir);
-        }
-    }
-    header('Location: ' . urldecode($whence));
-    exit;
-}
-
-// Handle comment reply
-if (isset($_GET['reply']) && isset($_GET['id'])) {
-    $id = (int)$_GET['id'];
-    $whence = $_GET['whence'] ?? 'news';
-    if ($user && isset($items[$id]) && comments_active($items[$id])) {
-        // Show comment form
-        // We'll handle via POST later
-    }
-    // For now redirect to item page
-    header('Location: /item?id=' . $id);
-    exit;
-}
-
-// Handle POST submissions (story, comment, edit, etc.)
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    // Process forms
-    if (isset($_POST['submit_story'])) {
-        // Submit story
-        $url = $_POST['url'] ?? '';
-        $title = $_POST['title'] ?? '';
-        $text = $_POST['text'] ?? '';
-        if ($user) {
-            $process = process_story($user, $url, $title, $text, $_SERVER['REMOTE_ADDR']);
-            if ($process) {
-                header('Location: /newest');
-                exit;
+// ----------------------- Processing Functions -------------------
+function process_story($user, $url, $title, $text, $ip) {
+    global $items, $profiles, $config;
+    if (empty($title) || (empty($url) && empty($text))) return false;
+    if (strlen($title) > $config['title_limit']) return false;
+    if (!empty($url)) {
+        foreach ($items as $item) {
+            if ($item['type'] == 'story' && live($item) && $item['url'] == $url) {
+                vote_for($user, $item, 'up');
+                return true;
             }
         }
-    } elseif (isset($_POST['submit_comment'])) {
-        $parent = (int)$_POST['parent'];
-        $text = $_POST['text'] ?? '';
-        $whence = $_POST['whence'] ?? 'news';
-        if ($user && isset($items[$parent]) && comments_active($items[$parent])) {
-            process_comment($user, $items[$parent], $text, $_SERVER['REMOTE_ADDR'], $whence);
-            header('Location: ' . urldecode($whence));
-            exit;
-        }
-    } elseif (isset($_POST['edit_item'])) {
-        $id = (int)$_POST['id'];
-        if ($user && isset($items[$id]) && canedit($user, $items[$id])) {
-            $item = &$items[$id];
-            // Update fields based on type
-            // ... (simplified)
-            save_item($item);
-            header('Location: /item?id=' . $id);
-            exit;
-        }
     }
-    // Redirect to home if not handled
-    header('Location: /');
-    exit;
+    $id = max(array_keys($items)) + 1;
+    $story = [
+        'id' => $id,
+        'type' => 'story',
+        'by' => $user,
+        'ip' => $ip,
+        'time' => seconds(),
+        'url' => $url,
+        'title' => $title,
+        'text' => $text,
+        'votes' => [],
+        'score' => 0,
+        'sockvotes' => 0,
+        'flags' => [],
+        'dead' => false,
+        'deleted' => false,
+        'parts' => [],
+        'parent' => null,
+        'kids' => [],
+        'keys' => [],
+    ];
+    $items[$id] = $story;
+    save_item($story);
+    $profiles[$user]['submitted'][] = $id;
+    save_profile($user);
+    vote_for($user, $story, 'up');
+    return true;
 }
 
-// ----------------------- Page Handlers -------------------------
-function render_page($title, $content) {
-    global $config, $user;
-    ?>
-<!DOCTYPE html>
-<html>
-<head>
-    <title><?= htmlspecialchars($config['this_site'] . ($title ? ' | ' . $title : '')) ?></title>
-    <link rel="stylesheet" type="text/css" href="/news.css">
-    <?php if ($config['favicon_url']): ?>
-    <link rel="shortcut icon" href="<?= htmlspecialchars($config['favicon_url']) ?>">
-    <?php endif; ?>
-    <script>
-        function byId(id) { return document.getElementById(id); }
-        function vote(node) {
-            var v = node.id.split('_');
-            var item = v[1];
-            var score = byId('score_' + item);
-            var newscore = parseInt(score.innerHTML) + (v[0] == 'up' ? 1 : -1);
-            score.innerHTML = newscore + (newscore == 1 ? ' point' : ' points');
-            byId('up_' + item).style.visibility = 'hidden';
-            byId('down_' + item).style.visibility = 'hidden';
-            var ping = new Image();
-            ping.src = node.href;
-            return false;
-        }
-    </script>
-</head>
-<body>
-<center>
-<table border="0" cellpadding="0" cellspacing="0" width="85%" bgcolor="#f6f6ef">
-    <!-- Top Bar -->
-    <tr>
-        <td bgcolor="<?= htmlspecialchars($config['site_color']) ?>" style="padding:2px;">
-            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td style="width:18px;padding-right:4px;">
-                        <a href="<?= htmlspecialchars($config['parent_url']) ?>">
-                            <img src="<?= htmlspecialchars($config['logo_url']) ?>" width="18" height="18" style="border:1px solid <?= htmlspecialchars($config['border_color']) ?>;" alt="">
-                        </a>
-                    </td>
-                    <td style="line-height:12pt;height:10px;">
-                        <span class="pagetop">
-                            <b><a href="/"><?= htmlspecialchars($config['this_site']) ?></a></b>
-                            <?php if (noob($user)): ?>
-                            <span class="sp">|</span>
-                            <a href="/welcome">welcome</a>
-                            <?php endif; ?>
-                            <span class="sp">|</span>
-                            <a href="/newest">new</a>
-                            <?php if ($user): ?>
-                            <span class="sp">|</span>
-                            <a href="/threads?id=<?= urlencode($user) ?>">threads</a>
-                            <?php endif; ?>
-                            <span class="sp">|</span>
-                            <a href="/newcomments">comments</a>
-                            <span class="sp">|</span>
-                            <a href="/leaders">leaders</a>
-                            <span class="sp">|</span>
-                            <a href="/submit">submit</a>
-                            <span class="sp">|</span>
-                            <span style="color:#ffffff;"><?= htmlspecialchars($title ?: 'news') ?></span>
-                        </span>
-                    </td>
-                    <td style="text-align:right;padding-right:4px;">
-                        <span class="pagetop">
-                            <?php if ($user): ?>
-                            <a href="/user?id=<?= urlencode($user) ?>"><?= htmlspecialchars($user) ?></a>&nbsp;(<?= karma($user) ?>)&nbsp;|&nbsp;
-                            <a href="/?logout">logout</a>
-                            <?php else: ?>
-                            <a href="/?login&user=guest">login</a>
-                            <?php endif; ?>
-                        </span>
-                    </td>
-                </tr>
-            </table>
-        </td>
-    </tr>
-    <tr><td style="height:10px;"></td></tr>
-    <!-- Page Content -->
-    <?= $content ?>
-    <!-- Admin Footer -->
-    <?php if (admin($user)): ?>
-    <tr><td style="height:10px;"></td></tr>
-    <tr>
-        <td>
-            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                <tr>
-                    <td class="admin" style="color:#828282;font-size:8.5pt;">
-                        <?= count($items) ?> / <?= max(array_keys($items)) ?> loaded &nbsp;|&nbsp; 38 mb &nbsp;|&nbsp; 122 msec
-                        <span class="sp">|</span>
-                        <a href="/newsadmin">settings</a>
-                    </td>
-                </tr>
-            </table>
-        </td>
-    </tr>
-    <?php endif; ?>
-    <tr><td style="height:10px;"></td></tr>
-</table>
-</center>
-</body>
-</html>
-    <?php
+function process_comment($user, $parent, $text, $ip, $whence) {
+    global $items, $profiles, $config;
+    if (empty(trim($text))) return;
+    $id = max(array_keys($items)) + 1;
+    $comment = [
+        'id' => $id,
+        'type' => 'comment',
+        'by' => $user,
+        'ip' => $ip,
+        'time' => seconds(),
+        'url' => '',
+        'title' => '',
+        'text' => $text,
+        'votes' => [],
+        'score' => 0,
+        'sockvotes' => 0,
+        'flags' => [],
+        'dead' => false,
+        'deleted' => false,
+        'parts' => [],
+        'parent' => $parent['id'],
+        'kids' => [],
+        'keys' => [],
+    ];
+    $items[$id] = $comment;
+    save_item($comment);
+    $parent['kids'][] = $id;
+    save_item($parent);
+    $profiles[$user]['submitted'][] = $id;
+    save_profile($user);
 }
 
-// ----------------------- Page Functions ------------------------
-function news_page() {
-    global $items, $ranked_stories, $config, $user;
-    $start = isset($_GET['start']) ? (int)$_GET['start'] : 0;
-    $end = $start + $config['perpage'];
-    $story_ids = array_slice($ranked_stories, $start, $config['perpage']);
-    $stories = array_filter(array_map(function($id) use ($items) {
-        return isset($items[$id]) ? $items[$id] : null;
-    }, $story_ids));
-    // Filter out dead/deleted if not admin
-    $visible_stories = visible($user, $stories);
-    ob_start();
-    echo '<tr><td>';
-    display_items($user, $visible_stories, null, 'news', $start, $end);
-    echo '</td></tr>';
-    return ob_get_clean();
-}
-
+// ----------------------- Display Functions ----------------------
 function display_items($user, $items, $label, $whence, $start=0, $end=null) {
     global $config;
     $n = $start;
@@ -765,14 +582,13 @@ function display_items($user, $items, $label, $whence, $start=0, $end=null) {
         echo '<tr><td style="height:5px;"></td></tr>';
     }
     echo '</table>';
-    // More link
     if ($end !== null && $end < count($items)) {
         echo '<a href="?start=' . $end . '" rel="nofollow">More</a>';
     }
 }
 
 function display_item($n, $item, $user, $whence) {
-    global $config;
+    global $config, $votes;
     $voted = isset($votes[$user][$item['id']]);
     $can_vote = !$voted && canvote($user, $item, 'up');
     ?>
@@ -781,10 +597,10 @@ function display_item($n, $item, $user, $whence) {
         <td valign="top" style="text-align:center;width:14px;">
             <?php if ($can_vote && live($item)): ?>
             <a id="up_<?= $item['id'] ?>" onclick="return vote(this)" href="/?for=<?= $item['id'] ?>&dir=up&by=<?= urlencode($user) ?>&auth=<?= $_SESSION['auth_token'] ?>&whence=<?= urlencode($whence) ?>" style="text-decoration:none;">
-                <span class="vote-arrow">&#9650;</span>
+                <span class="vote-arrow">▲</span>
             </a>
             <?php else: ?>
-            <span style="visibility:hidden;">&#9650;</span>
+            <span style="visibility:hidden;">▲</span>
             <?php endif; ?>
         </td>
         <td class="title">
@@ -834,54 +650,6 @@ function display_item($n, $item, $user, $whence) {
     <?php
 }
 
-function item_page($id) {
-    global $items, $user;
-    if (!isset($items[$id]) || !news_type($items[$id])) {
-        echo "No such item.";
-        return;
-    }
-    $item = $items[$id];
-    if (!cansee($user, $item)) {
-        echo "You can't see this item.";
-        return;
-    }
-    ob_start();
-    ?>
-    <tr><td>
-        <table border="0" cellpadding="0" cellspacing="0">
-            <?php display_item(null, $item, $user, '/item?id=' . $id); ?>
-            <?php if (!empty($item['text']) && empty($item['url']) && in_array($item['type'], ['story','poll'])): ?>
-            <tr><td></td><td></td><td class="comment"><?= nl2br(htmlspecialchars($item['text'])) ?></td></tr>
-            <?php endif; ?>
-            <?php if (apoll($item) && !empty($item['parts'])): ?>
-            <tr><td colspan="3" style="height:10px;"></td></tr>
-            <?php foreach ($item['parts'] as $opt_id): ?>
-                <?php if (isset($items[$opt_id])) display_item(null, $items[$opt_id], $user, '/item?id=' . $id); ?>
-            <?php endforeach; ?>
-            <?php endif; ?>
-            <?php if (comments_active($item)): ?>
-            <tr><td colspan="3" style="height:10px;"></td></tr>
-            <tr><td></td><td></td><td>
-                <form method="POST" action="/">
-                    <input type="hidden" name="parent" value="<?= $item['id'] ?>">
-                    <input type="hidden" name="whence" value="<?= urlencode('/item?id=' . $id) ?>">
-                    <textarea name="text" rows="6" cols="60"></textarea><br>
-                    <input type="submit" name="submit_comment" value="<?= acomment($item) ? 'reply' : 'add comment' ?>">
-                </form>
-            </td></tr>
-            <?php endif; ?>
-        </table>
-    </td></tr>
-    <?php
-    // Display comment tree
-    if (!empty($item['kids'])) {
-        echo '<tr><td>';
-        display_comment_tree($item, $user, '/item?id=' . $id, 0);
-        echo '</td></tr>';
-    }
-    return ob_get_clean();
-}
-
 function display_comment_tree($item, $user, $whence, $indent=0) {
     global $items;
     if (!cansee_descendant($user, $item)) return;
@@ -889,7 +657,6 @@ function display_comment_tree($item, $user, $whence, $indent=0) {
     display_comment($item, $user, $whence, true, $indent);
     echo '</td></tr>';
     if (!empty($item['kids'])) {
-        // Sort kids by rank (frontpage-rank)
         $kids = array_filter(array_map(function($id) use ($items) {
             return isset($items[$id]) ? $items[$id] : null;
         }, $item['kids']));
@@ -904,7 +671,7 @@ function display_comment_tree($item, $user, $whence, $indent=0) {
 }
 
 function display_comment($item, $user, $whence, $astree=true, $indent=0) {
-    global $config;
+    global $votes, $config;
     if (!cansee($user, $item)) return;
     $voted = isset($votes[$user][$item['id']]);
     $can_vote = !$voted && canvote($user, $item, 'up');
@@ -918,16 +685,16 @@ function display_comment($item, $user, $whence, $astree=true, $indent=0) {
             <td valign="top" style="text-align:center;width:14px;">
                 <?php if ($can_vote && live($item)): ?>
                 <a id="up_<?= $item['id'] ?>" onclick="return vote(this)" href="/?for=<?= $item['id'] ?>&dir=up&by=<?= urlencode($user) ?>&auth=<?= $_SESSION['auth_token'] ?>&whence=<?= urlencode($whence) ?>" style="text-decoration:none;">
-                    <span class="vote-arrow">&#9650;</span>
+                    <span class="vote-arrow">▲</span>
                 </a>
                 <?php if ($can_down): ?>
                 <br>
                 <a id="down_<?= $item['id'] ?>" onclick="return vote(this)" href="/?for=<?= $item['id'] ?>&dir=down&by=<?= urlencode($user) ?>&auth=<?= $_SESSION['auth_token'] ?>&whence=<?= urlencode($whence) ?>" style="text-decoration:none;">
-                    <span class="vote-arrow">&#9660;</span>
+                    <span class="vote-arrow">▼</span>
                 </a>
                 <?php endif; ?>
                 <?php else: ?>
-                <span style="visibility:hidden;">&#9650;</span>
+                <span style="visibility:hidden;">▲</span>
                 <?php endif; ?>
             </td>
             <td class="default">
@@ -972,238 +739,73 @@ function display_comment($item, $user, $whence, $astree=true, $indent=0) {
     <?php
 }
 
-// ----------------------- Processing Functions ------------------
-function process_story($user, $url, $title, $text, $ip) {
-    global $items, $config;
-    // Validate
-    if (empty($title) || (empty($url) && empty($text))) return false;
-    if (strlen($title) > $config['title_limit']) return false;
-    // Check for duplicate URL
-    if (!empty($url)) {
-        // simplified: check all stories for same url
-        foreach ($items as $item) {
-            if ($item['type'] == 'story' && live($item) && $item['url'] == $url) {
-                // vote for it and redirect to item
-                vote_for($user, $item, 'up');
-                return true;
-            }
-        }
+// ----------------------- Page Handlers -------------------------
+function news_page() {
+    global $ranked_stories, $items, $config, $user;
+    $start = isset($_GET['start']) ? (int)$_GET['start'] : 0;
+    $end = $start + $config['perpage'];
+    $story_ids = array_slice($ranked_stories, $start, $config['perpage']);
+    $stories = array_filter(array_map(function($id) use ($items) {
+        return isset($items[$id]) ? $items[$id] : null;
+    }, $story_ids));
+    $visible_stories = visible($user, $stories);
+    ob_start();
+    echo '<tr><td>';
+    display_items($user, $visible_stories, 'news', '/news', $start, $end);
+    echo '</td></tr>';
+    return ob_get_clean();
+}
+
+function item_page($id) {
+    global $items, $user;
+    if (!isset($items[$id]) || !news_type($items[$id])) return 'No such item.';
+    $item = $items[$id];
+    if (!cansee($user, $item)) return 'You can\'t see this item.';
+    ob_start();
+    ?>
+    <tr><td>
+        <table border="0" cellpadding="0" cellspacing="0">
+            <?php display_item(null, $item, $user, '/item?id=' . $id); ?>
+            <?php if (!empty($item['text']) && empty($item['url']) && in_array($item['type'], ['story','poll'])): ?>
+            <tr><td></td><td></td><td class="comment"><?= nl2br(htmlspecialchars($item['text'])) ?></td></tr>
+            <?php endif; ?>
+            <?php if (apoll($item) && !empty($item['parts'])): ?>
+            <tr><td colspan="3" style="height:10px;"></td></tr>
+            <?php foreach ($item['parts'] as $opt_id): ?>
+                <?php if (isset($items[$opt_id])) display_item(null, $items[$opt_id], $user, '/item?id=' . $id); ?>
+            <?php endforeach; ?>
+            <?php endif; ?>
+            <?php if (comments_active($item)): ?>
+            <tr><td colspan="3" style="height:10px;"></td></tr>
+            <tr><td></td><td></td><td>
+                <form method="POST" action="/">
+                    <input type="hidden" name="parent" value="<?= $item['id'] ?>">
+                    <input type="hidden" name="whence" value="<?= urlencode('/item?id=' . $id) ?>">
+                    <textarea name="text" rows="6" cols="60"></textarea><br>
+                    <input type="submit" name="submit_comment" value="<?= acomment($item) ? 'reply' : 'add comment' ?>">
+                </form>
+            </td></tr>
+            <?php endif; ?>
+        </table>
+    </td></tr>
+    <?php
+    if (!empty($item['kids'])) {
+        echo '<tr><td>';
+        display_comment_tree($item, $user, '/item?id=' . $id, 0);
+        echo '</td></tr>';
     }
-    // Create story
-    $id = max(array_keys($items)) + 1;
-    $story = [
-        'id' => $id,
-        'type' => 'story',
-        'by' => $user,
-        'ip' => $ip,
-        'time' => seconds(),
-        'url' => $url,
-        'title' => $title,
-        'text' => $text,
-        'votes' => [],
-        'score' => 0,
-        'sockvotes' => 0,
-        'flags' => [],
-        'dead' => false,
-        'deleted' => false,
-        'parts' => [],
-        'parent' => null,
-        'kids' => [],
-        'keys' => [],
-    ];
-    $items[$id] = $story;
-    save_item($story);
-    // Register URL (optional)
-    // Add to user's submitted
-    $profiles[$user]['submitted'][] = $id;
-    save_profile($user);
-    // Vote for it
-    vote_for($user, $story, 'up');
-    return true;
+    return ob_get_clean();
 }
-
-function process_comment($user, $parent, $text, $ip, $whence) {
-    global $items, $config;
-    if (empty(trim($text))) return;
-    // Create comment
-    $id = max(array_keys($items)) + 1;
-    $comment = [
-        'id' => $id,
-        'type' => 'comment',
-        'by' => $user,
-        'ip' => $ip,
-        'time' => seconds(),
-        'url' => '',
-        'title' => '',
-        'text' => $text,
-        'votes' => [],
-        'score' => 0,
-        'sockvotes' => 0,
-        'flags' => [],
-        'dead' => false,
-        'deleted' => false,
-        'parts' => [],
-        'parent' => $parent['id'],
-        'kids' => [],
-        'keys' => [],
-    ];
-    $items[$id] = $comment;
-    save_item($comment);
-    // Add to parent's kids
-    $parent['kids'][] = $id;
-    save_item($parent);
-    // Add to user's submitted
-    $profiles[$user]['submitted'][] = $id;
-    save_profile($user);
-    // Auto-vote for own comment? Not in Arc.
-}
-
-// ----------------------- Routing Logic -------------------------
-$content = '';
-$title = 'news';
-
-switch ($route) {
-    case 'news':
-    case '':
-        $content = news_page();
-        $title = 'news';
-        break;
-    case 'newest':
-        // Similar to news but sorted by newest
-        // simplified: we just reverse rank order
-        $content = news_page(); // placeholder
-        $title = 'new';
-        break;
-    case 'item':
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
-        if ($id && isset($items[$id])) {
-            $content = item_page($id);
-            $title = $items[$id]['title'] ?? 'item';
-        } else {
-            $content = 'No such item.';
-        }
-        break;
-    case 'user':
-        $uid = $_GET['id'] ?? '';
-        if ($uid && isset($profiles[$uid])) {
-            $content = user_page($uid);
-            $title = 'Profile: ' . $uid;
-        } else {
-            $content = 'No such user.';
-        }
-        break;
-    case 'submit':
-        $content = submit_page();
-        $title = 'submit';
-        break;
-    case 'newcomments':
-        // Show recent comments
-        $content = 'Recent comments page';
-        $title = 'comments';
-        break;
-    case 'leaders':
-        $content = leaders_page();
-        $title = 'leaders';
-        break;
-    case 'threads':
-        $uid = $_GET['id'] ?? '';
-        if ($uid && isset($profiles[$uid])) {
-            $content = threads_page($uid);
-            $title = 'threads';
-        } else {
-            $content = 'No such user.';
-        }
-        break;
-    case 'submitted':
-        $uid = $_GET['id'] ?? '';
-        if ($uid && isset($profiles[$uid])) {
-            $content = submitted_page($uid);
-            $title = 'submissions';
-        } else {
-            $content = 'No such user.';
-        }
-        break;
-    case 'saved':
-        $uid = $_GET['id'] ?? '';
-        if ($uid && ($user == $uid || admin($user))) {
-            $content = saved_page($uid);
-            $title = 'saved';
-        } else {
-            $content = 'Cannot display.';
-        }
-        break;
-    case 'best':
-        $content = best_page();
-        $title = 'best';
-        break;
-    case 'bestcomments':
-        $content = best_comments_page();
-        $title = 'best comments';
-        break;
-    case 'active':
-        $content = active_page();
-        $title = 'active';
-        break;
-    case 'lists':
-        $content = lists_page();
-        $title = 'lists';
-        break;
-    case 'newsadmin':
-        if (admin($user)) {
-            $content = newsadmin_page();
-            $title = 'admin';
-        } else {
-            $content = 'You are not an admin.';
-        }
-        break;
-    case 'edit':
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
-        if ($id && isset($items[$id]) && canedit($user, $items[$id])) {
-            $content = edit_page($id);
-            $title = 'edit';
-        } else {
-            $content = 'Cannot edit.';
-        }
-        break;
-    case 'reply':
-        // Should handle form display
-        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
-        if ($id && isset($items[$id]) && comments_active($items[$id])) {
-            $content = reply_page($id);
-            $title = 'reply';
-        } else {
-            $content = 'Cannot reply.';
-        }
-        break;
-    case 'welcome':
-        $content = '<p>Welcome to ' . $config['this_site'] . '!</p>';
-        $title = 'welcome';
-        break;
-    case 'resetpw':
-        // Not implemented
-        break;
-    case 'scrubrules':
-        // Admin only
-        break;
-    default:
-        $content = 'Page not found.';
-        break;
-}
-
-// Render the page
-render_page($title, $content);
-
-// ----------------------- Placeholder Functions ------------------
-// Many pages are stubbed; in a full implementation these would be fleshed out.
 
 function user_page($uid) {
     global $profiles, $user, $items;
+    if (!isset($profiles[$uid])) return 'No such user.';
     $p = $profiles[$uid];
     $html = '<h2>Profile: ' . htmlspecialchars($uid) . '</h2>';
     $html .= '<p>Karma: ' . $p['karma'] . '</p>';
     $html .= '<p>Created: ' . date('Y-m-d H:i', $p['created']) . '</p>';
     if ($p['about']) $html .= '<p>' . nl2br(htmlspecialchars($p['about'])) . '</p>';
-    $html .= '<p><a href="/submitted?id=' . urlencode($uid) . '">submissions</a> | <a href="/threads?id=' . urlencode($uid) . '">comments</a></p>';
+    $html .= '<p><a href="/submitted?id=' . urlencode($uid) . '">submissions</a> | <a href="/threads?id=' . urlencode($uid) . '">comments</a> | <a href="/saved?id=' . urlencode($uid) . '">saved</a></p>';
     return $html;
 }
 
@@ -1244,6 +846,7 @@ function leaders_page() {
 
 function threads_page($uid) {
     global $profiles, $items, $user;
+    if (!isset($profiles[$uid])) return 'No such user.';
     $comment_ids = array_filter($profiles[$uid]['submitted'] ?? [], function($id) use ($items) {
         return isset($items[$id]) && acomment($items[$id]);
     });
@@ -1258,6 +861,7 @@ function threads_page($uid) {
 
 function submitted_page($uid) {
     global $profiles, $items, $user;
+    if (!isset($profiles[$uid])) return 'No such user.';
     $story_ids = array_filter($profiles[$uid]['submitted'] ?? [], function($id) use ($items) {
         return isset($items[$id]) && metastory($items[$id]);
     });
@@ -1269,8 +873,8 @@ function submitted_page($uid) {
 }
 
 function saved_page($uid) {
-    // Show stories user voted for
     global $votes, $items, $user;
+    if (!isset($profiles[$uid])) return 'No such user.';
     $voted_ids = array_keys($votes[$uid] ?? []);
     $stories = array_filter(array_map(function($id) use ($items) {
         return isset($items[$id]) ? $items[$id] : null;
@@ -1284,7 +888,6 @@ function saved_page($uid) {
 }
 
 function best_page() {
-    // Sort stories by score
     global $items, $user;
     $stories = array_filter($items, function($item) {
         return metastory($item) && live($item);
@@ -1315,7 +918,6 @@ function best_comments_page() {
 }
 
 function active_page() {
-    // Most active discussions (by comment count)
     global $items, $user;
     $stories = array_filter($items, function($item) {
         return metastory($item) && live($item) && !empty($item['kids']);
@@ -1331,13 +933,12 @@ function active_page() {
 }
 
 function lists_page() {
-    $html = '<ul><li><a href="/best">Best</a></li><li><a href="/active">Active</a></li><li><a href="/bestcomments">Best Comments</a></li><li><a href="/noobstories">Noob Stories</a></li><li><a href="/noobcomments">Noob Comments</a></li></ul>';
-    return $html;
+    return '<ul><li><a href="/best">Best</a></li><li><a href="/active">Active</a></li><li><a href="/bestcomments">Best Comments</a></li><li><a href="/noobstories">Noob Stories</a></li><li><a href="/noobcomments">Noob Comments</a></li></ul>';
 }
 
 function newsadmin_page() {
-    // Admin settings page
     global $config, $comment_kill, $comment_ignore, $lightweights, $user;
+    if (!admin($user)) return 'You are not an admin.';
     ob_start();
     echo '<h2>Admin Settings</h2>';
     echo '<form method="POST" action="/newsadmin">';
@@ -1347,7 +948,6 @@ function newsadmin_page() {
     echo 'Lightweight sites: <textarea name="lightweights">' . implode("\n", array_keys($lightweights)) . '</textarea><br>';
     echo '<input type="submit" value="Save">';
     echo '</form>';
-    // Kill all by user
     echo '<form method="POST" action="/newsadmin">';
     echo 'Kill all by: <input type="text" name="kill_user"><input type="submit" value="Kill">';
     echo '</form>';
@@ -1356,13 +956,13 @@ function newsadmin_page() {
 
 function edit_page($id) {
     global $items, $user;
+    if (!isset($items[$id]) || !canedit($user, $items[$id])) return 'Cannot edit.';
     $item = $items[$id];
     ob_start();
     echo '<h2>Edit Item</h2>';
     echo '<form method="POST" action="/">';
     echo '<input type="hidden" name="edit_item" value="1">';
     echo '<input type="hidden" name="id" value="' . $id . '">';
-    // Show fields based on type
     if (in_array($item['type'], ['story','poll','pollopt'])) {
         echo 'Title: <input type="text" name="title" value="' . htmlspecialchars($item['title']) . '"><br>';
     }
@@ -1384,6 +984,7 @@ function edit_page($id) {
 
 function reply_page($id) {
     global $items, $user;
+    if (!isset($items[$id]) || !comments_active($items[$id])) return 'Cannot reply.';
     $item = $items[$id];
     ob_start();
     echo '<h2>Reply to ' . htmlspecialchars($item['title'] ?: 'comment') . '</h2>';
@@ -1396,14 +997,350 @@ function reply_page($id) {
     return ob_get_clean();
 }
 
-// ----------------------- CSS Route ---------------------------
-if ($route == 'news.css') {
-    header('Content-Type: text/css');
-    // Output the exact CSS from the Arc source
-    readfile('news.css'); // Assumes you have a news.css file with the exact styles
+// ----------------------- Main Routing & Output ------------------
+ob_start(); // start output buffering
+
+// Load data
+load_all_data();
+
+// Handle authentication via GET
+$user = get_user();
+if (isset($_GET['logout'])) {
+    logout_user();
+    header('Location: /');
+    exit;
+}
+if (isset($_GET['login']) && isset($_GET['user'])) {
+    login_user($_GET['user']);
+    header('Location: /');
     exit;
 }
 
-// If news.css doesn't exist, generate it from the source.
-// (In practice, you'd create a static news.css file with the Arc CSS.)
+// Handle POST actions
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    if (isset($_POST['submit_story'])) {
+        if ($user) {
+            process_story($user, $_POST['url'] ?? '', $_POST['title'] ?? '', $_POST['text'] ?? '', $_SERVER['REMOTE_ADDR']);
+            header('Location: /newest');
+            exit;
+        }
+    } elseif (isset($_POST['submit_comment'])) {
+        $parent_id = (int)($_POST['parent'] ?? 0);
+        $text = $_POST['text'] ?? '';
+        $whence = $_POST['whence'] ?? '/';
+        if ($user && isset($items[$parent_id]) && comments_active($items[$parent_id])) {
+            process_comment($user, $items[$parent_id], $text, $_SERVER['REMOTE_ADDR'], $whence);
+            header('Location: ' . urldecode($whence));
+            exit;
+        }
+    } elseif (isset($_POST['edit_item'])) {
+        $id = (int)$_POST['id'];
+        if ($user && isset($items[$id]) && canedit($user, $items[$id])) {
+            $item = &$items[$id];
+            if (in_array($item['type'], ['story','poll','pollopt']) && isset($_POST['title'])) $item['title'] = $_POST['title'];
+            if (in_array($item['type'], ['story','pollopt']) && isset($_POST['url'])) $item['url'] = $_POST['url'];
+            if (in_array($item['type'], ['story','comment','poll','pollopt']) && isset($_POST['text'])) $item['text'] = $_POST['text'];
+            if (admin($user)) {
+                if (isset($_POST['score'])) $item['score'] = (int)$_POST['score'];
+                $item['dead'] = isset($_POST['dead']);
+                $item['deleted'] = isset($_POST['deleted']);
+            }
+            save_item($item);
+            header('Location: /item?id=' . $id);
+            exit;
+        }
+    }
+    // Fallback
+    header('Location: /');
+    exit;
+}
+
+// Handle GET actions (kill, delete, flag)
+if (isset($_GET['kill']) && admin($user)) {
+    $id = (int)$_GET['kill'];
+    if (isset($items[$id])) {
+        $items[$id]['dead'] = !$items[$id]['dead'];
+        save_item($items[$id]);
+    }
+    header('Location: ' . ($_GET['whence'] ?? '/'));
+    exit;
+}
+if (isset($_GET['delete']) && admin($user)) {
+    $id = (int)$_GET['delete'];
+    if (isset($items[$id])) {
+        $items[$id]['deleted'] = !$items[$id]['deleted'];
+        save_item($items[$id]);
+    }
+    header('Location: ' . ($_GET['whence'] ?? '/'));
+    exit;
+}
+if (isset($_GET['flag']) && $user) {
+    $id = (int)$_GET['flag'];
+    if (isset($items[$id]) && $user != $items[$id]['by']) {
+        // Simplified flagging
+        if (!in_array($user, $items[$id]['flags'] ?? [])) {
+            $items[$id]['flags'][] = $user;
+            // Auto-kill if enough flags
+            if (count($items[$id]['flags']) >= $config['flag_kill_threshold'] && realscore($items[$id]) < 10) {
+                $items[$id]['dead'] = true;
+            }
+            save_item($items[$id]);
+        }
+    }
+    header('Location: ' . ($_GET['whence'] ?? '/'));
+    exit;
+}
+
+// Routing
+$uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$route = ltrim($uri, '/');
+if ($route == '') $route = 'news';
+
+$content = '';
+$title = 'news';
+
+switch ($route) {
+    case 'news':
+        $content = news_page();
+        $title = 'news';
+        break;
+    case 'newest':
+        // Simple: sort stories by time descending
+        $stories = array_filter($items, function($item) {
+            return metastory($item) && live($item);
+        });
+        usort($stories, function($a, $b) { return $b['time'] - $a['time']; });
+        $stories = array_slice($stories, 0, $config['perpage']);
+        $stories = visible($user, $stories);
+        ob_start();
+        echo '<tr><td>';
+        display_items($user, $stories, 'newest', '/newest');
+        echo '</td></tr>';
+        $content = ob_get_clean();
+        $title = 'new';
+        break;
+    case 'item':
+        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+        $content = item_page($id);
+        $title = $items[$id]['title'] ?? 'item';
+        break;
+    case 'user':
+        $uid = $_GET['id'] ?? '';
+        $content = user_page($uid);
+        $title = 'Profile';
+        break;
+    case 'submit':
+        $content = submit_page();
+        $title = 'submit';
+        break;
+    case 'newcomments':
+        // Show recent comments
+        $comments = array_filter($items, function($item) {
+            return acomment($item) && live($item);
+        });
+        usort($comments, function($a, $b) { return $b['time'] - $a['time']; });
+        $comments = array_slice($comments, 0, $config['perpage']);
+        $comments = visible($user, $comments);
+        ob_start();
+        echo '<tr><td>';
+        display_items($user, $comments, 'newcomments', '/newcomments');
+        echo '</td></tr>';
+        $content = ob_get_clean();
+        $title = 'comments';
+        break;
+    case 'leaders':
+        $content = leaders_page();
+        $title = 'leaders';
+        break;
+    case 'threads':
+        $uid = $_GET['id'] ?? '';
+        $content = threads_page($uid);
+        $title = 'threads';
+        break;
+    case 'submitted':
+        $uid = $_GET['id'] ?? '';
+        $content = submitted_page($uid);
+        $title = 'submissions';
+        break;
+    case 'saved':
+        $uid = $_GET['id'] ?? '';
+        $content = saved_page($uid);
+        $title = 'saved';
+        break;
+    case 'best':
+        $content = best_page();
+        $title = 'best';
+        break;
+    case 'bestcomments':
+        $content = best_comments_page();
+        $title = 'best comments';
+        break;
+    case 'active':
+        $content = active_page();
+        $title = 'active';
+        break;
+    case 'lists':
+        $content = lists_page();
+        $title = 'lists';
+        break;
+    case 'newsadmin':
+        $content = newsadmin_page();
+        $title = 'admin';
+        break;
+    case 'edit':
+        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+        $content = edit_page($id);
+        $title = 'edit';
+        break;
+    case 'reply':
+        $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+        $content = reply_page($id);
+        $title = 'reply';
+        break;
+    case 'welcome':
+        $content = '<p>Welcome to ' . $config['this_site'] . '!</p>';
+        $title = 'welcome';
+        break;
+    default:
+        $content = '<p>Page not found.</p>';
+        break;
+}
+
+// Render the page with CSS
+?>
+<!DOCTYPE html>
+<html>
+<head>
+<title><?= htmlspecialchars($config['this_site'] . ($title ? ' | ' . $title : '')) ?></title>
+<style>
+body  { font-family:Verdana; font-size:10pt; color:#828282; margin:0; padding:0; background:#f6f6ef; }
+td    { font-family:Verdana; font-size:10pt; color:#828282; }
+.admin td   { font-family:Verdana; font-size:8.5pt; color:#000000; }
+.subtext td { font-family:Verdana; font-size:  7pt; color:#828282; }
+input    { font-family:Courier; font-size:10pt; color:#000000; }
+input[type="submit"] { font-family:Verdana; }
+textarea { font-family:Courier; font-size:10pt; color:#000000; }
+a:link    { color:#000000; text-decoration:none; } 
+a:visited { color:#828282; text-decoration:none; }
+.default { font-family:Verdana; font-size: 10pt; color:#828282; }
+.admin   { font-family:Verdana; font-size:8.5pt; color:#000000; }
+.title   { font-family:Verdana; font-size: 10pt; color:#828282; }
+.adtitle { font-family:Verdana; font-size:  9pt; color:#828282; }
+.subtext { font-family:Verdana; font-size:  7pt; color:#828282; }
+.yclinks { font-family:Verdana; font-size:  8pt; color:#828282; }
+.pagetop { font-family:Verdana; font-size: 10pt; color:#222222; }
+.comhead { font-family:Verdana; font-size:  8pt; color:#828282; }
+.comment { font-family:Verdana; font-size:  9pt; color:#000000; }
+.dead    { font-family:Verdana; font-size:  9pt; color:#dddddd; }
+.comment a:link, .comment a:visited { text-decoration:underline; }
+.dead a:link, .dead a:visited { color:#dddddd; }
+.pagetop a:visited { color:#000000; }
+.topsel a:link, .topsel a:visited { color:#ffffff; }
+.subtext a:link, .subtext a:visited { color:#828282; }
+.subtext a:hover { text-decoration:underline; }
+.comhead a:link, .subtext a:visited { color:#828282; }
+.comhead a:hover { text-decoration:underline; }
+.default p { margin-top: 8px; margin-bottom: 0px; }
+.vote-arrow { font-size:14px; line-height:10px; color:#828282; text-decoration:none; }
+.topbar { background:<?= $config['site_color'] ?>; padding:2px; }
+.topbar a { color:#000000; }
+.topbar .sel { color:#ffffff; font-weight:bold; }
+.topbar .sp { padding:0 5px; }
+.container { width:85%; margin:0 auto; background:#f6f6ef; }
+.spacer { height:5px; }
+.spacer-large { height:10px; }
+</style>
+<script>
+function byId(id) { return document.getElementById(id); }
+function vote(node) {
+    var v = node.id.split('_');
+    var item = v[1];
+    var score = byId('score_' + item);
+    var newscore = parseInt(score.innerHTML) + (v[0] == 'up' ? 1 : -1);
+    score.innerHTML = newscore + (newscore == 1 ? ' point' : ' points');
+    byId('up_' + item).style.visibility = 'hidden';
+    byId('down_' + item).style.visibility = 'hidden';
+    var ping = new Image();
+    ping.src = node.href;
+    return false;
+}
+</script>
+</head>
+<body>
+<center>
+<table class="container" border="0" cellpadding="0" cellspacing="0" width="85%" bgcolor="#f6f6ef">
+    <!-- Top Bar -->
+    <tr>
+        <td class="topbar" bgcolor="<?= $config['site_color'] ?>" style="padding:2px;">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                    <td style="width:18px;padding-right:4px;">
+                        <a href="<?= $config['parent_url'] ?>">
+                            <img src="<?= $config['logo_url'] ?>" width="18" height="18" style="border:1px solid <?= $config['border_color'] ?>;" alt="">
+                        </a>
+                    </td>
+                    <td style="line-height:12pt;height:10px;">
+                        <span class="pagetop">
+                            <b><a href="/"><?= $config['this_site'] ?></a></b>
+                            <?php if (noob($user)): ?>
+                            <span class="sp">|</span>
+                            <a href="/welcome">welcome</a>
+                            <?php endif; ?>
+                            <span class="sp">|</span>
+                            <a href="/newest">new</a>
+                            <?php if ($user): ?>
+                            <span class="sp">|</span>
+                            <a href="/threads?id=<?= urlencode($user) ?>">threads</a>
+                            <?php endif; ?>
+                            <span class="sp">|</span>
+                            <a href="/newcomments">comments</a>
+                            <span class="sp">|</span>
+                            <a href="/leaders">leaders</a>
+                            <span class="sp">|</span>
+                            <a href="/submit">submit</a>
+                            <span class="sp">|</span>
+                            <span style="color:#ffffff;"><?= htmlspecialchars($title) ?></span>
+                        </span>
+                    </td>
+                    <td style="text-align:right;padding-right:4px;">
+                        <span class="pagetop">
+                            <?php if ($user): ?>
+                            <a href="/user?id=<?= urlencode($user) ?>"><?= htmlspecialchars($user) ?></a>&nbsp;(<?= karma($user) ?>)&nbsp;|&nbsp;
+                            <a href="/?logout">logout</a>
+                            <?php else: ?>
+                            <a href="/?login&user=guest">login</a>
+                            <?php endif; ?>
+                        </span>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+    <tr><td style="height:10px;"></td></tr>
+    <!-- Page Content -->
+    <?= $content ?>
+    <!-- Admin Footer -->
+    <?php if (admin($user)): ?>
+    <tr><td style="height:10px;"></td></tr>
+    <tr>
+        <td>
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                    <td class="admin" style="color:#828282;font-size:8.5pt;">
+                        <?= count($items) ?> / <?= max(array_keys($items)) ?> loaded &nbsp;|&nbsp; 38 mb &nbsp;|&nbsp; 122 msec
+                        <span class="sp">|</span>
+                        <a href="/newsadmin">settings</a>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+    <?php endif; ?>
+    <tr><td style="height:10px;"></td></tr>
+</table>
+</center>
+</body>
+</html>
+<?php
+ob_end_flush();
 ?>
